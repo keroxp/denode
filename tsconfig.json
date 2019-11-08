@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "target": "es2015",
+    "module": "commonjs",
+    "lib": ["esnext"],
+    "baseUrl": ".",
+    "paths": {
+      "*": ["./deno.d.ts"]
+    }
+  },
+  "include": ["*.ts"]
+}

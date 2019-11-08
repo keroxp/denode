@@ -1,0 +1,17 @@
+{
+  "name": "denode",
+  "version": "0.1.0",
+  "main": "index.js",
+  "author": "keroxp <kerokerokerop@gmail.com>",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^12.12.6",
+    "prettier": "^1.18.2",
+    "ts-node": "^8.4.1",
+    "typescript": "^3.7.2"
+  },
+  "dependencies": {
+    "js-base64": "^2.5.1",
+    "node-fetch": "^2.6.0"
+  }
+}
