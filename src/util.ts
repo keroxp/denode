@@ -1,4 +1,4 @@
-import { EOF, Reader, Writer } from "./denode";
+import { EOF, Reader, Writer } from "./deno";
 
 interface Deferred<T> extends Promise<T> {
   status(): "resolved" | "rejected" | undefined;

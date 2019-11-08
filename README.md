@@ -1,2 +1,2 @@
-# denode
-Deno pollyfill for Node.js
+# [WIP] denode
+Deno polyfill for Node.js

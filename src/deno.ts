@@ -949,7 +949,7 @@ export function rename(oldpath: string, newpath: string): Promise<void> {
  *       console.log(decoder.decode(data));
  */
 export function readFileSync(filename: string): Uint8Array {
-  return fs.readFileSync(filename).bytes();
+  return fs.readFileSync(filename);
 }
 
 /** Read the entire contents of a file.
@@ -961,7 +961,7 @@ export function readFileSync(filename: string): Uint8Array {
 export async function readFile(filename: string): Promise<Uint8Array> {
   const readFileAsync = promisify(fs.readFile);
   const buf = await readFileAsync(filename);
-  return buf.bytes();
+  return buf;
 }
 
 export interface FileInfo {

@@ -1,4 +1,4 @@
-const _Deno = require("./denode");
+const _Deno = require("./deno");
 const { Base64 } = require("js-base64");
 const _fetch = require("node-fetch");
 const _url = require("url");
