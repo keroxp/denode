@@ -1,3 +1,5 @@
+import { EOF, Reader, Writer } from "./denode";
+
 interface Deferred<T> extends Promise<T> {
   status(): "resolved" | "rejected" | undefined;
   resolve(t: T);
@@ -42,7 +44,7 @@ export function concatBytes(...chunks: Uint8Array[]): Uint8Array {
   return ret;
 }
 
-export function streamToReader(stream: NodeJS.ReadableStream): Deno.Reader {
+export function streamToReader(stream: NodeJS.ReadableStream): Reader {
   let ended = false;
   let err: any | undefined;
   let buf: Uint8Array = new Uint8Array();
@@ -59,9 +61,9 @@ export function streamToReader(stream: NodeJS.ReadableStream): Deno.Reader {
     .on("error", e => {
       err = e;
     });
-  async function read(p: Uint8Array): Promise<number | Deno.EOF> {
+  async function read(p: Uint8Array): Promise<number | EOF> {
     if (ended) {
-      return Deno.EOF;
+      return EOF;
     } else if (err) {
       throw err;
     }
@@ -78,7 +80,7 @@ export function streamToReader(stream: NodeJS.ReadableStream): Deno.Reader {
   return { read };
 }
 
-export function streamToWriter(stream: NodeJS.WritableStream): Deno.Writer {
+export function streamToWriter(stream: NodeJS.WritableStream): Writer {
   async function write(p: Uint8Array): Promise<number> {
     return new Promise<number>((resolve, reject) => {
       stream.write(p, err => {

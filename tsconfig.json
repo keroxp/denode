@@ -4,9 +4,11 @@
     "module": "commonjs",
     "lib": ["esnext"],
     "baseUrl": ".",
+    "outDir": "dist",
     "paths": {
-      "*": ["./deno.d.ts"]
     }
   },
-  "include": ["*.ts"]
+  "include": [
+    "src/**/*.ts"
+  ]
 }

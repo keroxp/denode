@@ -1,5 +1,4 @@
 import { promisify, inspect as nodeInspect } from "util";
-
 const os = require("os");
 const cp = require("child_process");
 const path = require("path");
@@ -121,10 +120,76 @@ export function cwd(): string {
 export function chdir(directory: string): void {
   process.chdir(directory);
 }
+export const EOF = Symbol("EOF");
+export type EOF = typeof EOF;
 
-// @url js/io.d.ts
-
-export const EOF = null;
+export enum SeekMode {
+  SEEK_START = 0,
+  SEEK_CURRENT = 1,
+  SEEK_END = 2
+}
+export interface Reader {
+  /** Reads up to p.byteLength bytes into `p`. It resolves to the number
+   * of bytes read (`0` < `n` <= `p.byteLength`) and rejects if any error encountered.
+   * Even if `read()` returns `n` < `p.byteLength`, it may use all of `p` as
+   * scratch space during the call. If some data is available but not
+   * `p.byteLength` bytes, `read()` conventionally returns what is available
+   * instead of waiting for more.
+   *
+   * When `read()` encounters end-of-file condition, it returns EOF symbol.
+   *
+   * When `read()` encounters an error, it rejects with an error.
+   *
+   * Callers should always process the `n` > `0` bytes returned before
+   * considering the EOF. Doing so correctly handles I/O errors that happen
+   * after reading some bytes and also both of the allowed EOF behaviors.
+   *
+   * Implementations must not retain `p`.
+   */
+  read(p: Uint8Array): Promise<number | EOF>;
+}
+export interface SyncReader {
+  readSync(p: Uint8Array): number | EOF;
+}
+export interface Writer {
+  /** Writes `p.byteLength` bytes from `p` to the underlying data
+   * stream. It resolves to the number of bytes written from `p` (`0` <= `n` <=
+   * `p.byteLength`) and any error encountered that caused the write to stop
+   * early. `write()` must return a non-null error if it returns `n` <
+   * `p.byteLength`. write() must not modify the slice data, even temporarily.
+   *
+   * Implementations must not retain `p`.
+   */
+  write(p: Uint8Array): Promise<number>;
+}
+export interface SyncWriter {
+  writeSync(p: Uint8Array): number;
+}
+export interface Closer {
+  close(): void;
+}
+export interface Seeker {
+  /** Seek sets the offset for the next `read()` or `write()` to offset,
+   * interpreted according to `whence`: `SeekStart` means relative to the start
+   * of the file, `SeekCurrent` means relative to the current offset, and
+   * `SeekEnd` means relative to the end. Seek returns the new offset relative
+   * to the start of the file and an error, if any.
+   *
+   * Seeking to an offset before the start of the file is an error. Seeking to
+   * any positive offset is legal, but the behavior of subsequent I/O operations
+   * on the underlying object is implementation-dependent.
+   */
+  seek(offset: number, whence: SeekMode): Promise<void>;
+}
+export interface SyncSeeker {
+  seekSync(offset: number, whence: SeekMode): void;
+}
+export interface ReadCloser extends Reader, Closer {}
+export interface WriteCloser extends Writer, Closer {}
+export interface ReadSeeker extends Reader, Seeker {}
+export interface WriteSeeker extends Writer, Seeker {}
+export interface ReadWriteCloser extends Reader, Writer, Closer {}
+export interface ReadWriteSeeker extends Reader, Writer, Seeker {}
 
 /** Copies from `src` to `dst` until either `EOF` is reached on `src`
  * or an error occurs. It returns the number of bytes copied and the first
@@ -133,14 +198,11 @@ export const EOF = null;
  * Because `copy()` is defined to read from `src` until `EOF`, it does not
  * treat an `EOF` from `read()` as an error to be reported.
  */
-export async function copy(
-  dst: Deno.Writer,
-  src: Deno.Reader
-): Promise<number> {
+export async function copy(dst: Writer, src: Reader): Promise<number> {
   const buf = new Uint8Array(2048);
-  let result: Deno.EOF | number;
+  let result: EOF | number;
   let total = 0;
-  while ((result = await src.read(buf)) !== Deno.EOF) {
+  while ((result = await src.read(buf)) !== EOF) {
     if (result === buf.byteLength) {
       await dst.write(buf);
     } else {
@@ -158,11 +220,11 @@ export async function copy(
  *      }
  */
 export async function* toAsyncIterator(
-  r: Deno.Reader
+  r: Reader
 ): AsyncIterableIterator<Uint8Array> {
-  let result: Deno.EOF | number;
+  let result: EOF | number;
   const buf = new Uint8Array(2048);
-  while ((result = await r.read(buf)) !== Deno.EOF) {
+  while ((result = await r.read(buf)) !== EOF) {
     if (result === buf.byteLength) {
       yield buf;
     } else {
@@ -177,13 +239,13 @@ const fstatAsync = promisify(fs.fstat);
 
 class DenoFile
   implements
-    Deno.Reader,
-    Deno.SyncReader,
-    Deno.Writer,
-    Deno.SyncWriter,
-    Deno.Seeker,
-    Deno.SyncSeeker,
-    Deno.Closer {
+    Reader,
+    SyncReader,
+    Writer,
+    SyncWriter,
+    Seeker,
+    SyncSeeker,
+    Closer {
   private loc = 0;
 
   constructor(readonly fd: number, readonly rid: number) {}
@@ -196,38 +258,34 @@ class DenoFile
     return fs.writeSync(this.fd, p);
   }
 
-  async read(p: Uint8Array): Promise<number | Deno.EOF> {
+  async read(p: Uint8Array): Promise<number | EOF> {
     const r = readAsync(this.fd, p, 0, p.byteLength, this.loc);
     return r === 0 ? EOF : r;
   }
 
-  readSync(p: Uint8Array): number | Deno.EOF {
+  readSync(p: Uint8Array): number | EOF {
     const result = fs.readSync(this.fd, p, 0, p.byteLength, this.loc);
     this.loc += result;
-    if (result === 0) {
-      return EOF;
-    } else {
-      return result;
-    }
+    return result === 0 ? EOF : result;
   }
 
-  async seek(offset: number, whence: Deno.SeekMode): Promise<void> {
-    if (whence === Deno.SeekMode.SEEK_START) {
+  async seek(offset: number, whence: SeekMode): Promise<void> {
+    if (whence === SeekMode.SEEK_START) {
       this.loc = offset;
-    } else if (whence === Deno.SeekMode.SEEK_CURRENT) {
+    } else if (whence === SeekMode.SEEK_CURRENT) {
       this.loc += offset;
-    } else if (whence === Deno.SeekMode.SEEK_END) {
+    } else if (whence === SeekMode.SEEK_END) {
       const stats = await fstatAsync(this.fd);
       this.loc = stats.size - offset;
     }
   }
 
-  seekSync(offset: number, whence: Deno.SeekMode): void {
-    if (whence === Deno.SeekMode.SEEK_START) {
+  seekSync(offset: number, whence: SeekMode): void {
+    if (whence === SeekMode.SEEK_START) {
       this.loc = offset;
-    } else if (whence === Deno.SeekMode.SEEK_CURRENT) {
+    } else if (whence === SeekMode.SEEK_CURRENT) {
       this.loc += offset;
-    } else if (whence === Deno.SeekMode.SEEK_END) {
+    } else if (whence === SeekMode.SEEK_END) {
       const stats = fs.fstatSync(this.fd);
       this.loc = stats.size - offset;
     }
@@ -246,9 +304,9 @@ export { DenoFile as File };
 
 // @url js/files.d.ts
 
-const files: Map<number, Deno.File> = new Map();
-const processes: Map<number, Deno.Process> = new Map();
-const conns: Map<number, Deno.Conn> = new Map();
+const files: Map<number, DenoFile> = new Map();
+const processes: Map<number, DenoProcess> = new Map();
+const conns: Map<number, Conn> = new Map();
 let resourceId = 3;
 
 /** Open a file and return an instance of the `File` object
@@ -256,7 +314,7 @@ let resourceId = 3;
  *
  *       const file = Deno.openSync("/foo/bar.txt");
  */
-export function openSync(filename: string, mode?: Deno.OpenMode): Deno.File {
+export function openSync(filename: string, mode?: OpenMode): DenoFile {
   const fd = fs.openSync(filename, mode);
   const rid = resourceId++;
   const f = new DenoFile(fd, rid);
@@ -270,11 +328,8 @@ export function openSync(filename: string, mode?: Deno.OpenMode): Deno.File {
  *         const file = await Deno.open("/foo/bar.txt");
  *       })();
  */
-export function open(
-  filename: string,
-  mode?: Deno.OpenMode
-): Promise<Deno.File> {
-  return new Promise<Deno.File>((resolve, reject) => {
+export function open(filename: string, mode?: OpenMode): Promise<DenoFile> {
+  return new Promise<DenoFile>((resolve, reject) => {
     fs.open(filename, mode, (err, fd) => {
       if (err) {
         reject(err);
@@ -298,7 +353,7 @@ export function open(
  *      const text = new TextDecoder().decode(buf);
  *
  */
-export function readSync(rid: number, p: Uint8Array): number | Deno.EOF {
+export function readSync(rid: number, p: Uint8Array): number | EOF {
   const file = files.get(rid);
   return file.readSync(p);
 }
@@ -314,7 +369,7 @@ export function readSync(rid: number, p: Uint8Array): number | Deno.EOF {
  *         const text = new TextDecoder().decode(buf);
  *       })();
  */
-export function read(rid: number, p: Uint8Array): Promise<number | Deno.EOF> {
+export function read(rid: number, p: Uint8Array): Promise<number | EOF> {
   const file = files.get(rid);
   return file.read(p);
 }
@@ -355,11 +410,7 @@ export function write(rid: number, p: Uint8Array): Promise<number> {
  *       const file = Deno.openSync("/foo/bar.txt");
  *       Deno.seekSync(file.rid, 0, 0);
  */
-export function seekSync(
-  rid: number,
-  offset: number,
-  whence: Deno.SeekMode
-): void {
+export function seekSync(rid: number, offset: number, whence: SeekMode): void {
   const file = files.get(rid);
   return file.seekSync(offset, whence);
 }
@@ -374,7 +425,7 @@ export function seekSync(
 export function seek(
   rid: number,
   offset: number,
-  whence: Deno.SeekMode
+  whence: SeekMode
 ): Promise<void> {
   const file = files.get(rid);
   return file.seek(offset, whence);
@@ -407,19 +458,43 @@ export function close(rid: number): void {
 }
 
 /** An instance of `File` for stdin. */
-export const stdin: Deno.File = new DenoFile(0, 0);
+export const stdin: DenoFile = new DenoFile(0, 0);
 /** An instance of `File` for stdout. */
-export const stdout: Deno.File = new DenoFile(1, 1);
+export const stdout: DenoFile = new DenoFile(1, 1);
 /** An instance of `File` for stderr. */
-export const stderr: Deno.File = new DenoFile(2, 2);
+export const stderr: DenoFile = new DenoFile(2, 2);
+
+export type OpenMode =
+  | "r"
+  /** Read-write. Start at beginning of file. */
+  | "r+"
+  /** Write-only. Opens and truncates existing file or creates new one for
+   * writing only.
+   */
+  | "w"
+  /** Read-write. Opens and truncates existing file or creates new one for
+   * writing and reading.
+   */
+  | "w+"
+  /** Write-only. Opens existing file or creates new one. Each write appends
+   * content to the end of file.
+   */
+  | "a"
+  /** Read-write. Behaves like "a" and allows to read from file. */
+  | "a+"
+  /** Write-only. Exclusive create - creates new file only if one doesn't exist
+   * already.
+   */
+  | "x"
+  /** Read-write. Behaves like `x` and allows to read from file. */
+  | "x+";
 
 // @url js/buffer.d.ts
 
 /** A Buffer is a variable-sized buffer of bytes with read() and write()
  * methods. Based on https://golang.org/pkg/bytes/#Buffer
  */
-class DenoBuffer
-  implements Deno.Reader, Deno.SyncReader, Deno.Writer, Deno.SyncWriter {
+class DenoBuffer implements Reader, SyncReader, Writer, SyncWriter {
   private buf: Buffer;
   private off: number = 0;
 
@@ -495,7 +570,7 @@ class DenoBuffer
    * is drained. The return value n is the number of bytes read. If the
    * buffer has no data to return, eof in the response will be true.
    */
-  readSync(p: Uint8Array): number | Deno.EOF {
+  readSync(p: Uint8Array): number | EOF {
     if (this.off === this.buf.byteLength) {
       return EOF;
     }
@@ -508,7 +583,7 @@ class DenoBuffer
     return end;
   }
 
-  async read(p: Uint8Array): Promise<number | Deno.EOF> {
+  async read(p: Uint8Array): Promise<number | EOF> {
     return this.readSync(p);
   }
 
@@ -549,17 +624,17 @@ class DenoBuffer
    * buffer becomes too large, readFrom will panic with ErrTooLarge.
    * Based on https://golang.org/pkg/bytes/#Buffer.ReadFrom
    */
-  readFrom(r: Deno.Reader): Promise<number> {
+  readFrom(r: Reader): Promise<number> {
     return copy(this, r);
   }
 
   /** Sync version of `readFrom`
    */
-  readFromSync(r: Deno.SyncReader): number {
-    let result: number | Deno.EOF;
+  readFromSync(r: SyncReader): number {
+    let result: number | EOF;
     const buf = new Uint8Array(2048);
     let total = 0;
-    while ((result = r.readSync(buf)) !== Deno.EOF) {
+    while ((result = r.readSync(buf)) !== EOF) {
       for (let i = 0; i < result; i++) {
         this.buf[this.off + i] = buf[i];
       }
@@ -574,7 +649,7 @@ export { DenoBuffer as Buffer };
 
 /** Read `r` until EOF and return the content as `Uint8Array`.
  */
-export async function readAll(r: Deno.Reader): Promise<Uint8Array> {
+export async function readAll(r: Reader): Promise<Uint8Array> {
   let chunks: Uint8Array[] = [];
   for await (const chunk of toAsyncIterator(r)) {
     chunks.push(chunk);
@@ -584,8 +659,8 @@ export async function readAll(r: Deno.Reader): Promise<Uint8Array> {
 
 /** Read synchronously `r` until EOF and return the content as `Uint8Array`.
  */
-export function readAllSync(r: Deno.SyncReader): Uint8Array {
-  let result: number | Deno.EOF;
+export function readAllSync(r: SyncReader): Uint8Array {
+  let result: number | EOF;
   let buf = new Uint8Array(2048);
   const chunks: Uint8Array[] = [];
   while ((result = r.readSync(buf)) !== EOF) {
@@ -597,7 +672,7 @@ export function readAllSync(r: Deno.SyncReader): Uint8Array {
 
 /** Write all the content of `arr` to `w`.
  */
-export async function writeAll(w: Deno.Writer, arr: Uint8Array): Promise<void> {
+export async function writeAll(w: Writer, arr: Uint8Array): Promise<void> {
   let offs = 0;
   const bufSize = 2048;
   offs += await w.write(arr);
@@ -611,7 +686,7 @@ export async function writeAll(w: Deno.Writer, arr: Uint8Array): Promise<void> {
 
 /** Write synchronously all the content of `arr` to `w`.
  */
-export function writeAllSync(w: Deno.SyncWriter, arr: Uint8Array): void {
+export function writeAllSync(w: SyncWriter, arr: Uint8Array): void {
   let offs = 0;
   const bufSize = 2048;
   offs += w.writeSync(arr);
@@ -663,12 +738,18 @@ export function mkdir(
   });
 }
 
+export interface MakeTempDirOptions {
+  dir?: string;
+  prefix?: string;
+  suffix?: string;
+}
+
 /** makeTempDirSync is the synchronous version of `makeTempDir`.
  *
  *       const tempDirName0 = Deno.makeTempDirSync();
  *       const tempDirName1 = Deno.makeTempDirSync({ prefix: 'my_temp' });
  */
-export function makeTempDirSync(options?: Deno.MakeTempDirOptions): string {
+export function makeTempDirSync(options?: MakeTempDirOptions): string {
   if (!options) {
     return fs.mkdtempSync("");
   } else {
@@ -698,7 +779,7 @@ export function makeTempDirSync(options?: Deno.MakeTempDirOptions): string {
  *       const tempDirName1 = await Deno.makeTempDir({ prefix: 'my_temp' });
  */
 export async function makeTempDir(
-  options?: Deno.MakeTempDirOptions
+  options?: MakeTempDirOptions
 ): Promise<string> {
   const mkdtempAsync = promisify(fs.mkdtemp);
   const existsAsync = promisify(fs.exists);
@@ -790,6 +871,10 @@ export function utime(
   return promisify(fs.utime)(filename, atime, mtime);
 }
 
+export interface RemoveOption {
+  recursive?: boolean;
+}
+
 /** Removes the named file or directory synchronously. Would throw
  * error if permission denied, not found, or directory not empty if `recursive`
  * set to false.
@@ -797,7 +882,7 @@ export function utime(
  *
  *       Deno.removeSync("/path/to/dir/or/file", {recursive: false});
  */
-export function removeSync(path: string, options?: Deno.RemoveOption): void {
+export function removeSync(path: string, options?: RemoveOption): void {
   // TODO: recursive
   const stats = fs.statSync(path);
   if (stats.isDirectory()) {
@@ -817,7 +902,7 @@ export function removeSync(path: string, options?: Deno.RemoveOption): void {
  */
 export async function remove(
   path: string,
-  options?: Deno.RemoveOption
+  options?: RemoveOption
 ): Promise<void> {
   const statAsync = promisify(fs.stat);
   const rmdirAsync = promisify(fs.rmdir);
@@ -879,6 +964,44 @@ export async function readFile(filename: string): Promise<Uint8Array> {
   return buf.bytes();
 }
 
+export interface FileInfo {
+  /** The size of the file, in bytes. */
+  len: number;
+  /** The last modification time of the file. This corresponds to the `mtime`
+   * field from `stat` on Unix and `ftLastWriteTime` on Windows. This may not
+   * be available on all platforms.
+   */
+  modified: number | null;
+  /** The last access time of the file. This corresponds to the `atime`
+   * field from `stat` on Unix and `ftLastAccessTime` on Windows. This may not
+   * be available on all platforms.
+   */
+  accessed: number | null;
+  /** The last access time of the file. This corresponds to the `birthtime`
+   * field from `stat` on Unix and `ftCreationTime` on Windows. This may not
+   * be available on all platforms.
+   */
+  created: number | null;
+  /** The underlying raw st_mode bits that contain the standard Unix permissions
+   * for this file/directory. TODO Match behavior with Go on windows for mode.
+   */
+  mode: number | null;
+  /** The file or directory name. */
+  name: string | null;
+  /** Returns whether this is info for a regular file. This result is mutually
+   * exclusive to `FileInfo.isDirectory` and `FileInfo.isSymlink`.
+   */
+  isFile(): boolean;
+  /** Returns whether this is info for a regular directory. This result is
+   * mutually exclusive to `FileInfo.isFile` and `FileInfo.isSymlink`.
+   */
+  isDirectory(): boolean;
+  /** Returns whether this is info for a symlink. This result is
+   * mutually exclusive to `FileInfo.isFile` and `FileInfo.isDirectory`.
+   */
+  isSymlink(): boolean;
+}
+
 // @url js/read_dir.d.ts
 
 /** Reads the directory given by path and returns a list of file info
@@ -886,7 +1009,7 @@ export async function readFile(filename: string): Promise<Uint8Array> {
  *
  *       const files = Deno.readDirSync("/");
  */
-export function readDirSync(path: string): Deno.FileInfo[] {
+export function readDirSync(path: string): FileInfo[] {
   return fs.readdirSync(path).map(statSync);
 }
 
@@ -894,7 +1017,7 @@ export function readDirSync(path: string): Deno.FileInfo[] {
  *
  *       const files = await Deno.readDir("/");
  */
-export async function readDir(path: string): Promise<Deno.FileInfo[]> {
+export async function readDir(path: string): Promise<FileInfo[]> {
   const readDirAsync = promisify(fs.readdir);
   const arr = await readDirAsync(path);
   return Promise.all(arr.map(stat));
@@ -949,7 +1072,7 @@ export function readlink(name: string): Promise<string> {
   return readlinkAsync(name);
 }
 
-function statToFileInfo(filename: string, stats: Stats): Deno.FileInfo {
+function statToFileInfo(filename: string, stats: Stats): FileInfo {
   return {
     accessed: stats.atimeMs,
     created: stats.ctimeMs,
@@ -975,7 +1098,7 @@ function statToFileInfo(filename: string, stats: Stats): Deno.FileInfo {
  *       const fileInfo = await Deno.lstat("hello.txt");
  *       assert(fileInfo.isFile());
  */
-export async function lstat(filename: string): Promise<Deno.FileInfo> {
+export async function lstat(filename: string): Promise<FileInfo> {
   const lstatAsync = promisify(fs.lstat);
   const stats = await lstatAsync(filename);
   return statToFileInfo(filename, stats);
@@ -988,7 +1111,7 @@ export async function lstat(filename: string): Promise<Deno.FileInfo> {
  *       const fileInfo = Deno.lstatSync("hello.txt");
  *       assert(fileInfo.isFile());
  */
-export function lstatSync(filename: string): Deno.FileInfo {
+export function lstatSync(filename: string): FileInfo {
   const stats = fs.lstatSync(filename);
   return statToFileInfo(filename, stats);
 }
@@ -999,7 +1122,7 @@ export function lstatSync(filename: string): Deno.FileInfo {
  *       const fileInfo = await Deno.stat("hello.txt");
  *       assert(fileInfo.isFile());
  */
-export async function stat(filename: string): Promise<Deno.FileInfo> {
+export async function stat(filename: string): Promise<FileInfo> {
   const statAsync = promisify(fs.stat);
   const stats = await statAsync(filename);
   return statToFileInfo(filename, stats);
@@ -1011,7 +1134,7 @@ export async function stat(filename: string): Promise<Deno.FileInfo> {
  *       const fileInfo = Deno.statSync("hello.txt");
  *       assert(fileInfo.isFile());
  */
-export function statSync(filename: string): Deno.FileInfo {
+export function statSync(filename: string): FileInfo {
   const stats = fs.statSync(filename);
   return statToFileInfo(filename, stats);
 }
@@ -1170,6 +1293,59 @@ export function applySourceMap(location: Location): Location {
 }
 
 // @url js/errors.d.ts
+export enum ErrorKind {
+  NoError = 0,
+  NotFound = 1,
+  PermissionDenied = 2,
+  ConnectionRefused = 3,
+  ConnectionReset = 4,
+  ConnectionAborted = 5,
+  NotConnected = 6,
+  AddrInUse = 7,
+  AddrNotAvailable = 8,
+  BrokenPipe = 9,
+  AlreadyExists = 10,
+  WouldBlock = 11,
+  InvalidInput = 12,
+  InvalidData = 13,
+  TimedOut = 14,
+  Interrupted = 15,
+  WriteZero = 16,
+  Other = 17,
+  UnexpectedEof = 18,
+  BadResource = 19,
+  CommandFailed = 20,
+  EmptyHost = 21,
+  IdnaError = 22,
+  InvalidPort = 23,
+  InvalidIpv4Address = 24,
+  InvalidIpv6Address = 25,
+  InvalidDomainCharacter = 26,
+  RelativeUrlWithoutBase = 27,
+  RelativeUrlWithCannotBeABaseBase = 28,
+  SetHostOnCannotBeABaseUrl = 29,
+  Overflow = 30,
+  HttpUser = 31,
+  HttpClosed = 32,
+  HttpCanceled = 33,
+  HttpParse = 34,
+  HttpOther = 35,
+  TooLarge = 36,
+  InvalidUri = 37,
+  InvalidSeekMode = 38,
+  OpNotAvailable = 39,
+  WorkerInitFailed = 40,
+  UnixError = 41,
+  NoAsyncSupport = 42,
+  NoSyncSupport = 43,
+  ImportMapError = 44,
+  InvalidPath = 45,
+  ImportPrefixMissing = 46,
+  UnsupportedFetchScheme = 47,
+  TooManyRedirects = 48,
+  Diagnostic = 49,
+  JSError = 50
+}
 
 /** A Deno specific error.  The `kind` property is set to a specific error code
  * which can be used to in application logic.
@@ -1186,7 +1362,7 @@ export function applySourceMap(location: Location): Location {
  *       }
  *
  */
-export class DenoError<T extends Deno.ErrorKind> extends Error {
+export class DenoError<T extends ErrorKind> extends Error {
   readonly kind: T;
 
   constructor(kind: T, msg: string) {
@@ -1216,6 +1392,19 @@ interface EnvPermissionDescriptor {
 interface HrtimePermissionDescriptor {
   name: "hrtime";
 }
+
+/** Permissions as granted by the caller
+ * See: https://w3c.github.io/permissions/#permission-registry
+ */
+export type PermissionName =
+  | "run"
+  | "read"
+  | "write"
+  | "net"
+  | "env"
+  | "hrtime";
+/** https://w3c.github.io/permissions/#status-of-a-permission */
+export type PermissionState = "granted" | "denied" | "prompt";
 
 /** See: https://w3c.github.io/permissions/#permission-descriptor */
 type PermissionDescriptor =
@@ -1249,9 +1438,9 @@ export const permissions: Permissions = new Permissions();
 
 /** https://w3c.github.io/permissions/#permissionstatus */
 export class PermissionStatus {
-  state: Deno.PermissionState;
+  state: PermissionState;
 
-  constructor(state: Deno.PermissionState) {
+  constructor(state: PermissionState) {
     this.state = state;
   }
 }
@@ -1278,6 +1467,47 @@ export function truncate(name: string, len?: number): Promise<void> {
   return truncateAsync(name, len);
 }
 
+type Transport = "tcp";
+interface Addr {
+  transport: Transport;
+  address: string;
+}
+
+/** A Listener is a generic network listener for stream-oriented protocols. */
+export interface Listener extends AsyncIterator<Conn> {
+  /** Waits for and resolves to the next connection to the `Listener`. */
+  accept(): Promise<Conn>;
+  /** Close closes the listener. Any pending accept promises will be rejected
+   * with errors.
+   */
+  close(): void;
+  /** Return the address of the `Listener`. */
+  addr(): Addr;
+  [Symbol.asyncIterator](): AsyncIterator<Conn>;
+}
+export interface Conn extends Reader, Writer, Closer {
+  /** The local address of the connection. */
+  localAddr: string;
+  /** The remote address of the connection. */
+  remoteAddr: string;
+  /** The resource ID of the connection. */
+  rid: number;
+  /** Shuts down (`shutdown(2)`) the reading side of the TCP connection. Most
+   * callers should just use `close()`.
+   */
+  closeRead(): void;
+  /** Shuts down (`shutdown(2)`) the writing side of the TCP connection. Most
+   * callers should just use `close()`.
+   */
+  closeWrite(): void;
+}
+
+export interface ListenOptions {
+  port: number;
+  hostname?: string;
+  transport?: Transport;
+}
+
 /** Listen announces on the local transport address.
  *
  * @param options
@@ -1295,9 +1525,16 @@ export function truncate(name: string, len?: number): Promise<void> {
  *     listen({ hostname: "[2001:db8::1]", port: 80 });
  *     listen({ hostname: "golang.org", port: 80, transport: "tcp" })
  */
-export function listen(options: Deno.ListenOptions): Deno.Listener {
+export function listen(options: ListenOptions): Listener {
   // TODO
   throw new Error("unsupported");
+}
+export interface ListenTLSOptions {
+  port: number;
+  hostname?: string;
+  transport?: Transport;
+  certFile: string;
+  keyFile: string;
 }
 
 /** Listen announces on the local transport address over TLS (transport layer security).
@@ -1313,8 +1550,14 @@ export function listen(options: Deno.ListenOptions): Deno.Listener {
  *
  *     Deno.listenTLS({ port: 443, certFile: "./my_server.crt", keyFile: "./my_server.key" })
  */
-export function listenTLS(options: Deno.ListenTLSOptions): Deno.Listener {
+export function listenTLS(options: ListenTLSOptions): Listener {
   throw new Error("unsupported");
+}
+
+export interface DialOptions {
+  port: number;
+  hostname?: string;
+  transport?: Transport;
 }
 
 /** Dial connects to the address on the named transport.
@@ -1334,17 +1577,30 @@ export function listenTLS(options: Deno.ListenTLSOptions): Deno.Listener {
  *     dial({ hostname: "[2001:db8::1]", port: 80 });
  *     dial({ hostname: "golang.org", port: 80, transport: "tcp" })
  */
-export function dial(options: Deno.DialOptions): Promise<Deno.Conn> {
+export function dial(options: DialOptions): Promise<Conn> {
   throw new Error("unsupported");
+}
+
+export interface DialTLSOptions {
+  port: number;
+  hostname?: string;
+  certFile?: string;
 }
 
 /**
  * dialTLS establishes a secure connection over TLS (transport layer security).
  */
-export function dialTLS(options: Deno.DialTLSOptions): Promise<Deno.Conn> {
+export function dialTLS(options: DialTLSOptions): Promise<Conn> {
   throw new Error("unsupported");
 }
 
+export interface Metrics {
+  opsDispatched: number;
+  opsCompleted: number;
+  bytesSentControl: number;
+  bytesSentData: number;
+  bytesReceived: number;
+}
 /** Receive metrics from the privileged side of Deno.
  *
  *      > console.table(Deno.metrics())
@@ -1358,7 +1614,7 @@ export function dialTLS(options: Deno.DialTLSOptions): Promise<Deno.Conn> {
  *      │  bytesReceived   │  856   │
  *      └──────────────────┴────────┘
  */
-export function metrics(): Deno.Metrics {
+export function metrics(): Metrics {
   return {
     opsCompleted: 0,
     opsDispatched: 0,
@@ -1384,6 +1640,17 @@ export function resources(): ResourceMap {
     ...[...conns.entries()].map(e => [e[0], "conn"])
   ]);
 }
+type ProcessStdio = "inherit" | "piped" | "null";
+export interface RunOptions {
+  args: string[];
+  cwd?: string;
+  env?: {
+    [key: string]: string;
+  };
+  stdout?: ProcessStdio | number;
+  stderr?: ProcessStdio | number;
+  stdin?: ProcessStdio | number;
+}
 
 /** Send a signal to process under given PID. Unix only at this moment.
  * If pid is negative, the signal will be sent to the process group identified
@@ -1397,10 +1664,10 @@ export function kill(pid: number, signo: number): void {
 class DenoProcess {
   readonly rid: number;
   readonly pid: number;
-  readonly stdin?: Deno.WriteCloser;
-  readonly stdout?: Deno.ReadCloser;
-  readonly stderr?: Deno.ReadCloser;
-  statusDeferred = deferred<Deno.ProcessStatus>();
+  readonly stdin?: WriteCloser;
+  readonly stdout?: ReadCloser;
+  readonly stderr?: ReadCloser;
+  statusDeferred = deferred<ProcessStatus>();
 
   constructor(rid: number, readonly proc: ChildProcess) {
     this.rid = rid;
@@ -1427,7 +1694,7 @@ class DenoProcess {
       };
     }
     proc.on("exit", (code, sig) => {
-      const status: Deno.ProcessStatus = { success: false };
+      const status: ProcessStatus = { success: false };
       if (code === 0) {
         status.success = true;
       }
@@ -1442,7 +1709,7 @@ class DenoProcess {
     proc.on("error", err => this.statusDeferred.reject(err));
   }
 
-  status(): Promise<Deno.ProcessStatus> {
+  status(): Promise<ProcessStatus> {
     return this.statusDeferred;
   }
 
@@ -1478,8 +1745,13 @@ class DenoProcess {
   }
 }
 
-export {DenoProcess as Process}
+export { DenoProcess as Process };
 
+export interface ProcessStatus {
+  success: boolean;
+  code?: number;
+  signal?: number;
+}
 /**
  * Spawns new subprocess.
  *
@@ -1493,7 +1765,7 @@ export {DenoProcess as Process}
  * `opt.stdout`, `opt.stderr` and `opt.stdin` can be specified independently -
  * they can be set to either `ProcessStdio` or `rid` of open file.
  */
-export function run(opt: Deno.RunOptions): Deno.Process {
+export function run(opt: RunOptions): DenoProcess {
   const [cmd, ...args] = opt.args;
   const p = cp.spawn(cmd, args, {
     cwd: opt.cwd,
@@ -1599,13 +1871,15 @@ export const customInspect: unique symbol = Symbol("customInspect");
 export function inspect(value: unknown, options?: ConsoleOptions): string {
   return nodeInspect(value, options);
 }
+export type OperatingSystem = "mac" | "win" | "linux";
+export type Arch = "x64" | "arm64";
 
 /** Build related information */
 interface BuildInfo {
   /** The CPU architecture. */
-  arch: Deno.Arch;
+  arch: Arch;
   /** The operating system. */
-  os: Deno.OperatingSystem;
+  os: OperatingSystem;
 }
 
 export const build: BuildInfo = {
