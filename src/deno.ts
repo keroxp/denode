@@ -1,12 +1,10 @@
-import { promisify, inspect as nodeInspect } from "util";
-const os = require("os");
-const cp = require("child_process");
-const path = require("path");
-const net = require("net");
-const fs = require("fs");
-import { Stats } from "fs";
-import { ChildProcess } from "child_process";
-import { concatBytes, deferred, streamToReader, streamToWriter } from "./util";
+import * as fs from "fs";
+import * as util from "util";
+import * as os from "os";
+import * as path from "path";
+import * as cp from "child_process";
+import { deferred, streamToReader, streamToWriter } from "./util";
+import { readAll } from "./buffer";
 
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
 
@@ -233,10 +231,6 @@ export async function* toAsyncIterator(
   }
 }
 
-const writeAsync = promisify(fs.write);
-const readAsync = promisify(fs.read);
-const fstatAsync = promisify(fs.fstat);
-
 class DenoFile
   implements
     Reader,
@@ -250,8 +244,16 @@ class DenoFile
 
   constructor(readonly fd: number, readonly rid: number) {}
 
-  write(p: Uint8Array): Promise<number> {
-    return writeAsync(this.fd, p, 0, p.byteLength, this.loc);
+  async write(p: Uint8Array): Promise<number> {
+    return new Promise((resolve, reject) => {
+      fs.write(this.fd, p, 0, p.byteLength, (err, written) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(written);
+        }
+      });
+    });
   }
 
   writeSync(p: Uint8Array): number {
@@ -259,8 +261,16 @@ class DenoFile
   }
 
   async read(p: Uint8Array): Promise<number | EOF> {
-    const r = readAsync(this.fd, p, 0, p.byteLength, this.loc);
-    return r === 0 ? EOF : r;
+    return new Promise((resolve, reject) => {
+      fs.read(this.fd, p, 0, p.byteLength, this.loc, (err, bytesRead) => {
+        if (err) {
+          reject(err);
+        } else {
+          this.loc += bytesRead;
+          resolve(bytesRead);
+        }
+      });
+    });
   }
 
   readSync(p: Uint8Array): number | EOF {
@@ -275,7 +285,9 @@ class DenoFile
     } else if (whence === SeekMode.SEEK_CURRENT) {
       this.loc += offset;
     } else if (whence === SeekMode.SEEK_END) {
-      const stats = await fstatAsync(this.fd);
+      const stats = await new Promise<fs.Stats>((resolve, reject) => {
+        fs.fstat(this.fd, (e, v) => (e ? reject(e) : resolve(v)));
+      });
       this.loc = stats.size - offset;
     }
   }
@@ -328,19 +340,15 @@ export function openSync(filename: string, mode?: OpenMode): DenoFile {
  *         const file = await Deno.open("/foo/bar.txt");
  *       })();
  */
-export function open(filename: string, mode?: OpenMode): Promise<DenoFile> {
-  return new Promise<DenoFile>((resolve, reject) => {
-    fs.open(filename, mode, (err, fd) => {
-      if (err) {
-        reject(err);
-      } else {
-        const rid = resourceId++;
-        const f = new DenoFile(fd, rid);
-        files.set(rid, f);
-        return f;
-      }
-    });
-  });
+export async function open(
+  filename: string,
+  mode?: OpenMode
+): Promise<DenoFile> {
+  const fileHandle = await fs.promises.open(filename, 0o666, mode);
+  const rid = resourceId++;
+  const file = new DenoFile(fileHandle.fd, rid);
+  files.set(rid, file);
+  return file;
 }
 
 /** Read synchronously from a file ID into an array buffer.
@@ -489,215 +497,6 @@ export type OpenMode =
   /** Read-write. Behaves like `x` and allows to read from file. */
   | "x+";
 
-// @url js/buffer.d.ts
-
-/** A Buffer is a variable-sized buffer of bytes with read() and write()
- * methods. Based on https://golang.org/pkg/bytes/#Buffer
- */
-class DenoBuffer implements Reader, SyncReader, Writer, SyncWriter {
-  private buf: Buffer;
-  private off: number = 0;
-
-  constructor(ab?: ArrayBuffer) {
-    this.buf = Buffer.from(ab);
-  }
-
-  /** bytes() returns a slice holding the unread portion of the buffer.
-   * The slice is valid for use only until the next buffer modification (that
-   * is, only until the next call to a method like read(), write(), reset(), or
-   * truncate()). The slice aliases the buffer content at least until the next
-   * buffer modification, so immediate changes to the slice will affect the
-   * result of future reads.
-   */
-  bytes(): Uint8Array {
-    return this.buf;
-  }
-
-  /** toString() returns the contents of the unread portion of the buffer
-   * as a string. Warning - if multibyte characters are present when data is
-   * flowing through the buffer, this method may result in incorrect strings
-   * due to a character being split.
-   */
-  toString(): string {
-    return this.buf.toString();
-  }
-
-  /** empty() returns whether the unread portion of the buffer is empty. */
-  empty(): boolean {
-    return this.off === 0 && this.buf.byteLength === 0;
-  }
-
-  /** length is a getter that returns the number of bytes of the unread
-   * portion of the buffer
-   */
-  get length(): number {
-    return this.buf.byteLength - this.off;
-  }
-
-  /** Returns the capacity of the buffer's underlying byte slice, that is,
-   * the total space allocated for the buffer's data.
-   */
-  get capacity(): number {
-    return this.buf.byteLength;
-  }
-
-  /** truncate() discards all but the first n unread bytes from the buffer but
-   * continues to use the same allocated storage.  It throws if n is negative or
-   * greater than the length of the buffer.
-   */
-  truncate(n: number): void {
-    for (let i = n; i < this.buf.length; i++) {
-      this.buf[i] = 0;
-    }
-  }
-
-  /** reset() resets the buffer to be empty, but it retains the underlying
-   * storage for use by future writes. reset() is the same as truncate(0)
-   */
-  reset(): void {
-    this.buf = new Buffer(new Uint8Array(this.buf.byteLength));
-  }
-
-  /** _tryGrowByReslice() is a version of grow for the fast-case
-   * where the internal buffer only needs to be resliced. It returns the index
-   * where bytes should be written and whether it succeeded.
-   * It returns -1 if a reslice was not needed.
-   */
-  private _tryGrowByReslice;
-  private _reslice;
-
-  /** readSync() reads the next len(p) bytes from the buffer or until the buffer
-   * is drained. The return value n is the number of bytes read. If the
-   * buffer has no data to return, eof in the response will be true.
-   */
-  readSync(p: Uint8Array): number | EOF {
-    if (this.off === this.buf.byteLength) {
-      return EOF;
-    }
-    const rem = this.buf.byteLength - this.off;
-    let end = p.byteLength > rem ? p.byteLength : rem;
-    for (let i = 0; i < end; i++) {
-      p[i] = this.buf[this.off + i];
-    }
-    this.off += end;
-    return end;
-  }
-
-  async read(p: Uint8Array): Promise<number | EOF> {
-    return this.readSync(p);
-  }
-
-  writeSync(p: Uint8Array): number {
-    const rem = this.buf.byteLength - this.off;
-    let end = p.byteLength > rem ? p.byteLength : rem;
-    for (let i = 0; i < end; i++) {
-      this.buf[this.off + i] = p[i];
-    }
-    this.off += end;
-    return end;
-  }
-
-  async write(p: Uint8Array): Promise<number> {
-    return this.writeSync(p);
-  }
-
-  /** _grow() grows the buffer to guarantee space for n more bytes.
-   * It returns the index where bytes should be written.
-   * If the buffer can't grow it will throw with ErrTooLarge.
-   */
-  private _grow;
-
-  /** grow() grows the buffer's capacity, if necessary, to guarantee space for
-   * another n bytes. After grow(n), at least n bytes can be written to the
-   * buffer without another allocation. If n is negative, grow() will panic. If
-   * the buffer can't grow it will throw ErrTooLarge.
-   * Based on https://golang.org/pkg/bytes/#Buffer.Grow
-   */
-  grow(n: number): void {
-    const next = new Buffer(this.buf.byteLength + n);
-    next.set(this.buf, 0);
-    this.buf = next;
-  }
-
-  /** readFrom() reads data from r until EOF and appends it to the buffer,
-   * growing the buffer as needed. It returns the number of bytes read. If the
-   * buffer becomes too large, readFrom will panic with ErrTooLarge.
-   * Based on https://golang.org/pkg/bytes/#Buffer.ReadFrom
-   */
-  readFrom(r: Reader): Promise<number> {
-    return copy(this, r);
-  }
-
-  /** Sync version of `readFrom`
-   */
-  readFromSync(r: SyncReader): number {
-    let result: number | EOF;
-    const buf = new Uint8Array(2048);
-    let total = 0;
-    while ((result = r.readSync(buf)) !== EOF) {
-      for (let i = 0; i < result; i++) {
-        this.buf[this.off + i] = buf[i];
-      }
-      this.off += result;
-      total += result;
-    }
-    return total;
-  }
-}
-
-export { DenoBuffer as Buffer };
-
-/** Read `r` until EOF and return the content as `Uint8Array`.
- */
-export async function readAll(r: Reader): Promise<Uint8Array> {
-  let chunks: Uint8Array[] = [];
-  for await (const chunk of toAsyncIterator(r)) {
-    chunks.push(chunk);
-  }
-  return concatBytes(...chunks);
-}
-
-/** Read synchronously `r` until EOF and return the content as `Uint8Array`.
- */
-export function readAllSync(r: SyncReader): Uint8Array {
-  let result: number | EOF;
-  let buf = new Uint8Array(2048);
-  const chunks: Uint8Array[] = [];
-  while ((result = r.readSync(buf)) !== EOF) {
-    chunks.push(buf);
-    buf = new Uint8Array(2048);
-  }
-  return concatBytes(...chunks);
-}
-
-/** Write all the content of `arr` to `w`.
- */
-export async function writeAll(w: Writer, arr: Uint8Array): Promise<void> {
-  let offs = 0;
-  const bufSize = 2048;
-  offs += await w.write(arr);
-  while (offs < arr.byteLength) {
-    const remaining = arr.byteLength - offs;
-    let end = remaining > bufSize ? bufSize : remaining;
-    const written = await w.write(arr.subarray(offs, end));
-    offs += written;
-  }
-}
-
-/** Write synchronously all the content of `arr` to `w`.
- */
-export function writeAllSync(w: SyncWriter, arr: Uint8Array): void {
-  let offs = 0;
-  const bufSize = 2048;
-  offs += w.writeSync(arr);
-  while (offs < arr.byteLength) {
-    const remaining = arr.byteLength - offs;
-    let end = remaining > bufSize ? bufSize : remaining;
-    const written = w.writeSync(arr.subarray(offs, end));
-    offs += written;
-  }
-}
-
 // @url js/mkdir.d.ts
 
 /** Creates a new directory with the specified path synchronously.
@@ -781,22 +580,17 @@ export function makeTempDirSync(options?: MakeTempDirOptions): string {
 export async function makeTempDir(
   options?: MakeTempDirOptions
 ): Promise<string> {
-  const mkdtempAsync = promisify(fs.mkdtemp);
-  const existsAsync = promisify(fs.exists);
   if (!options) {
-    return mkdtempAsync("");
+    return fs.promises.mkdtemp("");
   } else {
     let dir = options.dir || os.tmpdir();
     const prefix = options.prefix || "";
     const suffix = options.suffix || "";
-    while (true) {
-      const rand = Math.random() * 100000;
-      const ret = path.join(dir, `${prefix}${rand}${suffix}`);
-      if (!(await existsAsync(ret))) {
-        await mkdir(ret, true);
-        return ret;
-      }
-    }
+    const day = Date.now();
+    const rand = Math.random() * 100000;
+    const ret = path.join(dir, `${prefix}${day}-${rand}${suffix}`);
+    await mkdir(ret, true);
+    return ret;
   }
 }
 
@@ -816,7 +610,7 @@ export function chmodSync(path: string, mode: number): void {
  *       await Deno.chmod("/path/to/file", 0o666);
  */
 export function chmod(path: string, mode: number): Promise<void> {
-  return promisify(fs.chmod)(path, mode);
+  return fs.promises.chmod(path, mode);
 }
 
 // @url js/chown.d.ts
@@ -838,7 +632,7 @@ export function chownSync(path: string, uid: number, gid: number): void {
  * @param gid group id of the new owner
  */
 export function chown(path: string, uid: number, gid: number): Promise<void> {
-  return promisify(fs.chmod)(path, uid, gid);
+  return fs.promises.chown(path, uid, gid);
 }
 
 // @url js/utime.d.ts
@@ -868,7 +662,7 @@ export function utime(
   atime: number | Date,
   mtime: number | Date
 ): Promise<void> {
-  return promisify(fs.utime)(filename, atime, mtime);
+  return fs.promises.utimes(filename, atime, mtime);
 }
 
 export interface RemoveOption {
@@ -904,15 +698,12 @@ export async function remove(
   path: string,
   options?: RemoveOption
 ): Promise<void> {
-  const statAsync = promisify(fs.stat);
-  const rmdirAsync = promisify(fs.rmdir);
-  const unlinkAasync = promisify(fs.unlink);
-  const stats = await statAsync(path);
+  const stats = await fs.promises.stat(path);
   if (stats.isDirectory()) {
-    await rmdirAsync(path, options);
+    await fs.promises.rmdir(path, options);
   } else {
     // TODO: recursive
-    await unlinkAasync(path);
+    await fs.promises.unlink(path);
   }
 }
 
@@ -936,8 +727,7 @@ export function renameSync(oldpath: string, newpath: string): void {
  *       await Deno.rename("old/path", "new/path");
  */
 export function rename(oldpath: string, newpath: string): Promise<void> {
-  const renameAsync = promisify(fs.rename);
-  return renameAsync(oldpath, newpath);
+  return fs.promises.rename(oldpath, newpath);
 }
 
 // @url js/read_file.d.ts
@@ -959,9 +749,7 @@ export function readFileSync(filename: string): Uint8Array {
  *       console.log(decoder.decode(data));
  */
 export async function readFile(filename: string): Promise<Uint8Array> {
-  const readFileAsync = promisify(fs.readFile);
-  const buf = await readFileAsync(filename);
-  return buf;
+  return fs.promises.readFile(filename);
 }
 
 export interface FileInfo {
@@ -1018,8 +806,7 @@ export function readDirSync(path: string): FileInfo[] {
  *       const files = await Deno.readDir("/");
  */
 export async function readDir(path: string): Promise<FileInfo[]> {
-  const readDirAsync = promisify(fs.readdir);
-  const arr = await readDirAsync(path);
+  const arr = await fs.promises.readdir(path);
   return Promise.all(arr.map(stat));
 }
 
@@ -1049,8 +836,7 @@ export function copyFileSync(from: string, to: string): void {
  *       await Deno.copyFile("from.txt", "to.txt");
  */
 export function copyFile(from: string, to: string): Promise<void> {
-  const copyFileAsync = promisify(fs.copyFile);
-  return copyFileAsync(from, to);
+  return fs.promises.copyFile(from, to);
 }
 
 // @url js/read_link.d.ts
@@ -1068,11 +854,10 @@ export function readlinkSync(name: string): string {
  *       const targetPath = await Deno.readlink("symlink/path");
  */
 export function readlink(name: string): Promise<string> {
-  const readlinkAsync = promisify(fs.readlink);
-  return readlinkAsync(name);
+  return fs.promises.readlink(name);
 }
 
-function statToFileInfo(filename: string, stats: Stats): FileInfo {
+function statToFileInfo(filename: string, stats: fs.Stats): FileInfo {
   return {
     accessed: stats.atimeMs,
     created: stats.ctimeMs,
@@ -1099,8 +884,7 @@ function statToFileInfo(filename: string, stats: Stats): FileInfo {
  *       assert(fileInfo.isFile());
  */
 export async function lstat(filename: string): Promise<FileInfo> {
-  const lstatAsync = promisify(fs.lstat);
-  const stats = await lstatAsync(filename);
+  const stats = await fs.promises.lstat(filename);
   return statToFileInfo(filename, stats);
 }
 
@@ -1123,8 +907,7 @@ export function lstatSync(filename: string): FileInfo {
  *       assert(fileInfo.isFile());
  */
 export async function stat(filename: string): Promise<FileInfo> {
-  const statAsync = promisify(fs.stat);
-  const stats = await statAsync(filename);
+  const stats = await fs.promises.stat(filename);
   return statToFileInfo(filename, stats);
 }
 
@@ -1154,8 +937,7 @@ export function linkSync(oldname: string, newname: string): void {
  *       await Deno.link("old/name", "new/name");
  */
 export function link(oldname: string, newname: string): Promise<void> {
-  const linkAsync = promisify(fs.link);
-  return linkAsync(oldname, newname);
+  return fs.promises.link(oldname, newname);
 }
 
 // @url js/symlink.d.ts
@@ -1185,8 +967,7 @@ export function symlink(
   newname: string,
   type?: "file" | "dir"
 ): Promise<void> {
-  const symlinkAsync = promisify(fs.symlink);
-  return symlinkAsync(oldname, newname, type);
+  return fs.promises.symlink(oldname, newname, type);
 }
 
 // @url js/write_file.d.ts
@@ -1241,14 +1022,13 @@ export function writeFile(
   options?: WriteFileOptions
 ): Promise<void> {
   let flag = "w";
-  const writeAsync = promisify(fs.write);
   if (options.create != null) {
     flag = options.create ? "w" : "wx";
   }
   if (options.append != null) {
     flag = options.append ? "a" : "ax";
   }
-  return writeAsync(filename, data, {
+  return fs.promises.writeFile(filename, data, {
     flag,
     mode: options.perm
   });
@@ -1463,8 +1243,7 @@ export function truncateSync(name: string, len?: number): void {
  *       await Deno.truncate("hello.txt", 10);
  */
 export function truncate(name: string, len?: number): Promise<void> {
-  const truncateAsync = promisify(fs.truncate);
-  return truncateAsync(name, len);
+  return fs.promises.truncate(name, len);
 }
 
 type Transport = "tcp";
@@ -1669,7 +1448,7 @@ class DenoProcess {
   readonly stderr?: ReadCloser;
   statusDeferred = deferred<ProcessStatus>();
 
-  constructor(rid: number, readonly proc: ChildProcess) {
+  constructor(rid: number, readonly proc: cp.ChildProcess) {
     this.rid = rid;
     this.pid = proc.pid;
     if (proc.stdin) {
@@ -1869,11 +1648,14 @@ export const customInspect: unique symbol = Symbol("customInspect");
  * as printed by `console.log(...)`;
  */
 export function inspect(value: unknown, options?: ConsoleOptions): string {
-  return nodeInspect(value, options);
+  return util.inspect(value, options);
 }
-export type OperatingSystem = "mac" | "win" | "linux";
-export type Arch = "x64" | "arm64";
-
+// export type OperatingSystem = "mac" | "win" | "linux";
+//'aix', 'darwin', 'freebsd', 'linux', 'openbsd', 'sunos', and 'win32'.
+export type OperatingSystem = string;
+// export type Arch = "x64" | "arm64";
+//'arm', 'arm64', 'ia32', 'mips', 'mipsel', 'ppc', 'ppc64', 's390', 's390x', 'x32', and 'x64'.
+export type Arch = string;
 /** Build related information */
 interface BuildInfo {
   /** The CPU architecture. */
@@ -1904,3 +1686,5 @@ export const version: Version = {
 // @url js/deno.d.ts
 
 export const args: string[] = [...process.argv];
+
+export * from "./buffer";

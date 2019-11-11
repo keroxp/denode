@@ -1,4 +1,5 @@
 import { EOF, Reader, Writer } from "./deno";
+import * as fs from "fs";
 
 interface Deferred<T> extends Promise<T> {
   status(): "resolved" | "rejected" | undefined;
@@ -89,4 +90,10 @@ export function streamToWriter(stream: NodeJS.WritableStream): Writer {
     });
   }
   return { write };
+}
+
+export function pathExists(path:string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    fs.exists(path, ok => resolve(ok));
+  })
 }
