@@ -3,8 +3,9 @@ import * as util from "util";
 import * as os from "os";
 import * as path from "path";
 import * as cp from "child_process";
-import { deferred, streamToReader, streamToWriter } from "./util";
-import { readAll } from "./buffer";
+import { ResourceTable } from "./resources";
+import { DenoFileImpl } from "./file";
+import { DenoProcessImpl } from "./process";
 
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
 
@@ -231,42 +232,34 @@ export async function* toAsyncIterator(
   }
 }
 
-class DenoFile
-  implements
-    Reader,
+export interface DenoFile
+  extends Reader,
     SyncReader,
     Writer,
     SyncWriter,
     Seeker,
     SyncSeeker,
     Closer {
-  private loc = 0;
+  readonly rid: number;
+}
 
-  constructor(readonly fd: number, readonly rid: number) {}
-
-  async write(p: Uint8Array): Promise<number> {
-    return new Promise((resolve, reject) => {
-      fs.write(this.fd, p, 0, p.byteLength, (err, written) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(written);
-        }
-      });
-    });
+class DenoStdioImpl implements DenoFile {
+  readonly rid = this.fd;
+  constructor(readonly fd: 0 | 1 | 2) {}
+  close(): void {
+    // noop
   }
 
-  writeSync(p: Uint8Array): number {
-    return fs.writeSync(this.fd, p);
-  }
-
-  async read(p: Uint8Array): Promise<number | EOF> {
-    return new Promise((resolve, reject) => {
-      fs.read(this.fd, p, 0, p.byteLength, this.loc, (err, bytesRead) => {
+  offs = 0;
+  read(p: Uint8Array): Promise<number | EOF> {
+    return new Promise<number | EOF>((resolve, reject) => {
+      fs.read(this.fd, p, 0, p.byteLength, this.offs, (err, bytesRead) => {
         if (err) {
           reject(err);
+        } else if (bytesRead === 0) {
+          resolve(EOF);
         } else {
-          this.loc += bytesRead;
+          this.offs += bytesRead;
           resolve(bytesRead);
         }
       });
@@ -274,64 +267,51 @@ class DenoFile
   }
 
   readSync(p: Uint8Array): number | EOF {
-    const result = fs.readSync(this.fd, p, 0, p.byteLength, this.loc);
-    this.loc += result;
-    return result === 0 ? EOF : result;
+    const bytesRead = fs.readSync(this.fd, p, 0, p.byteLength, this.offs);
+    this.offs += bytesRead;
+    return bytesRead === 0 ? EOF : bytesRead;
   }
 
-  async seek(offset: number, whence: SeekMode): Promise<void> {
-    if (whence === SeekMode.SEEK_START) {
-      this.loc = offset;
-    } else if (whence === SeekMode.SEEK_CURRENT) {
-      this.loc += offset;
-    } else if (whence === SeekMode.SEEK_END) {
-      const stats = await new Promise<fs.Stats>((resolve, reject) => {
-        fs.fstat(this.fd, (e, v) => (e ? reject(e) : resolve(v)));
-      });
-      this.loc = stats.size - offset;
-    }
+  seek(offset: number, whence: SeekMode): Promise<void> {
+    throw new Error("stdin/stdout/stderr can't be seeked");
   }
 
   seekSync(offset: number, whence: SeekMode): void {
-    if (whence === SeekMode.SEEK_START) {
-      this.loc = offset;
-    } else if (whence === SeekMode.SEEK_CURRENT) {
-      this.loc += offset;
-    } else if (whence === SeekMode.SEEK_END) {
-      const stats = fs.fstatSync(this.fd);
-      this.loc = stats.size - offset;
-    }
+    throw new Error("stdin/stdout/stderr can't be seeked");
   }
 
-  close(): void {
-    try {
-      fs.closeSync(this.fd);
-    } finally {
-      files.delete(this.rid);
-    }
+  write(p: Uint8Array): Promise<number> {
+    return new Promise<number>((resolve, reject) => {
+      fs.write(this.fd, p, 0, p.byteLength, this.offs, (err, written) => {
+        if (err) {
+          reject(err);
+        } else {
+          this.offs += written;
+          resolve(written);
+        }
+      });
+    });
+  }
+
+  writeSync(p: Uint8Array): number {
+    return fs.writeSync(this.fd, p, 0, p.byteLength, this.offs);
   }
 }
 
-export { DenoFile as File };
+export { DenoFileImpl as File };
 
 // @url js/files.d.ts
-
-const files: Map<number, DenoFile> = new Map();
-const processes: Map<number, DenoProcess> = new Map();
-const conns: Map<number, Conn> = new Map();
-let resourceId = 3;
 
 /** Open a file and return an instance of the `File` object
  *  synchronously.
  *
  *       const file = Deno.openSync("/foo/bar.txt");
  */
+/** @deprecated */
 export function openSync(filename: string, mode?: OpenMode): DenoFile {
-  const fd = fs.openSync(filename, mode);
-  const rid = resourceId++;
-  const f = new DenoFile(fd, rid);
-  files.set(rid, f);
-  return f;
+  // const file = awaitPromiseSync(fs.promises.open(filename, mode));
+  // return ResourceTable.openFile(file);
+  throw new Error("openSync is unsupported because of technical reason.");
 }
 
 /** Open a file and return an instance of the `File` object.
@@ -344,11 +324,8 @@ export async function open(
   filename: string,
   mode?: OpenMode
 ): Promise<DenoFile> {
-  const fileHandle = await fs.promises.open(filename, 0o666, mode);
-  const rid = resourceId++;
-  const file = new DenoFile(fileHandle.fd, rid);
-  files.set(rid, file);
-  return file;
+  const fileHandle = await fs.promises.open(filename, mode);
+  return ResourceTable.openFile(fileHandle);
 }
 
 /** Read synchronously from a file ID into an array buffer.
@@ -362,8 +339,7 @@ export async function open(
  *
  */
 export function readSync(rid: number, p: Uint8Array): number | EOF {
-  const file = files.get(rid);
-  return file.readSync(p);
+  return ResourceTable.getFile(rid).readSync(p);
 }
 
 /** Read from a file ID into an array buffer.
@@ -378,8 +354,7 @@ export function readSync(rid: number, p: Uint8Array): number | EOF {
  *       })();
  */
 export function read(rid: number, p: Uint8Array): Promise<number | EOF> {
-  const file = files.get(rid);
-  return file.read(p);
+  return ResourceTable.getFile(rid).read(p);
 }
 
 /** Write synchronously to the file ID the contents of the array buffer.
@@ -392,8 +367,7 @@ export function read(rid: number, p: Uint8Array): Promise<number | EOF> {
  *       Deno.writeSync(file.rid, data);
  */
 export function writeSync(rid: number, p: Uint8Array): number {
-  const file = files.get(rid);
-  return file.writeSync(p);
+  return ResourceTable.getFile(rid).writeSync(p);
 }
 
 /** Write to the file ID the contents of the array buffer.
@@ -409,8 +383,7 @@ export function writeSync(rid: number, p: Uint8Array): number {
  *
  */
 export function write(rid: number, p: Uint8Array): Promise<number> {
-  const file = files.get(rid);
-  return file.write(p);
+  return ResourceTable.getFile(rid).write(p);
 }
 
 /** Seek a file ID synchronously to the given offset under mode given by `whence`.
@@ -419,8 +392,7 @@ export function write(rid: number, p: Uint8Array): Promise<number> {
  *       Deno.seekSync(file.rid, 0, 0);
  */
 export function seekSync(rid: number, offset: number, whence: SeekMode): void {
-  const file = files.get(rid);
-  return file.seekSync(offset, whence);
+  ResourceTable.getFile(rid).seekSync(offset, whence);
 }
 
 /** Seek a file ID to the given offset under mode given by `whence`.
@@ -435,42 +407,20 @@ export function seek(
   offset: number,
   whence: SeekMode
 ): Promise<void> {
-  const file = files.get(rid);
-  return file.seek(offset, whence);
+  return ResourceTable.getFile(rid).seek(offset, whence);
 }
 
 /** Close the file ID. */
 export function close(rid: number): void {
-  if (files.has(rid)) {
-    const file = files.get(rid);
-    try {
-      file.close();
-    } finally {
-      files.delete(rid);
-    }
-  } else if (processes.has(rid)) {
-    const proc = processes.get(rid);
-    try {
-      proc.close();
-    } finally {
-      processes.delete(rid);
-    }
-  } else if (conns.has(rid)) {
-    const conn = conns.get(rid);
-    try {
-      conn.close();
-    } finally {
-      processes.delete(rid);
-    }
-  }
+  ResourceTable.close(rid);
 }
 
 /** An instance of `File` for stdin. */
-export const stdin: DenoFile = new DenoFile(0, 0);
+export const stdin: DenoFile = new DenoStdioImpl(0);
 /** An instance of `File` for stdout. */
-export const stdout: DenoFile = new DenoFile(1, 1);
+export const stdout: DenoFile = new DenoStdioImpl(1);
 /** An instance of `File` for stderr. */
-export const stderr: DenoFile = new DenoFile(2, 2);
+export const stderr: DenoFile = new DenoStdioImpl(2);
 
 export type OpenMode =
   | "r"
@@ -998,7 +948,7 @@ export function writeFileSync(
   }
 ): void {
   let flag = "w";
-  if (options.create != null) {
+  if (options?.create != null) {
     flag = options.create ? "w" : "wx";
   }
   if (options.append != null) {
@@ -1019,7 +969,10 @@ export function writeFileSync(
 export function writeFile(
   filename: string,
   data: Uint8Array,
-  options?: WriteFileOptions
+  options: WriteFileOptions = {
+    create: true,
+    append: false
+  }
 ): Promise<void> {
   let flag = "w";
   if (options.create != null) {
@@ -1246,133 +1199,6 @@ export function truncate(name: string, len?: number): Promise<void> {
   return fs.promises.truncate(name, len);
 }
 
-type Transport = "tcp";
-interface Addr {
-  transport: Transport;
-  address: string;
-}
-
-/** A Listener is a generic network listener for stream-oriented protocols. */
-export interface Listener extends AsyncIterator<Conn> {
-  /** Waits for and resolves to the next connection to the `Listener`. */
-  accept(): Promise<Conn>;
-  /** Close closes the listener. Any pending accept promises will be rejected
-   * with errors.
-   */
-  close(): void;
-  /** Return the address of the `Listener`. */
-  addr(): Addr;
-  [Symbol.asyncIterator](): AsyncIterator<Conn>;
-}
-export interface Conn extends Reader, Writer, Closer {
-  /** The local address of the connection. */
-  localAddr: string;
-  /** The remote address of the connection. */
-  remoteAddr: string;
-  /** The resource ID of the connection. */
-  rid: number;
-  /** Shuts down (`shutdown(2)`) the reading side of the TCP connection. Most
-   * callers should just use `close()`.
-   */
-  closeRead(): void;
-  /** Shuts down (`shutdown(2)`) the writing side of the TCP connection. Most
-   * callers should just use `close()`.
-   */
-  closeWrite(): void;
-}
-
-export interface ListenOptions {
-  port: number;
-  hostname?: string;
-  transport?: Transport;
-}
-
-/** Listen announces on the local transport address.
- *
- * @param options
- * @param options.port The port to connect to. (Required.)
- * @param options.hostname A literal IP address or host name that can be
- *   resolved to an IP address. If not specified, defaults to 0.0.0.0
- * @param options.transport Defaults to "tcp". Later we plan to add "tcp4",
- *   "tcp6", "udp", "udp4", "udp6", "ip", "ip4", "ip6", "unix", "unixgram" and
- *   "unixpacket".
- *
- * Examples:
- *
- *     listen({ port: 80 })
- *     listen({ hostname: "192.0.2.1", port: 80 })
- *     listen({ hostname: "[2001:db8::1]", port: 80 });
- *     listen({ hostname: "golang.org", port: 80, transport: "tcp" })
- */
-export function listen(options: ListenOptions): Listener {
-  // TODO
-  throw new Error("unsupported");
-}
-export interface ListenTLSOptions {
-  port: number;
-  hostname?: string;
-  transport?: Transport;
-  certFile: string;
-  keyFile: string;
-}
-
-/** Listen announces on the local transport address over TLS (transport layer security).
- *
- * @param options
- * @param options.port The port to connect to. (Required.)
- * @param options.hostname A literal IP address or host name that can be
- *   resolved to an IP address. If not specified, defaults to 0.0.0.0
- * @param options.certFile Server certificate file
- * @param options.keyFile Server public key file
- *
- * Examples:
- *
- *     Deno.listenTLS({ port: 443, certFile: "./my_server.crt", keyFile: "./my_server.key" })
- */
-export function listenTLS(options: ListenTLSOptions): Listener {
-  throw new Error("unsupported");
-}
-
-export interface DialOptions {
-  port: number;
-  hostname?: string;
-  transport?: Transport;
-}
-
-/** Dial connects to the address on the named transport.
- *
- * @param options
- * @param options.port The port to connect to. (Required.)
- * @param options.hostname A literal IP address or host name that can be
- *   resolved to an IP address. If not specified, defaults to 127.0.0.1
- * @param options.transport Defaults to "tcp". Later we plan to add "tcp4",
- *   "tcp6", "udp", "udp4", "udp6", "ip", "ip4", "ip6", "unix", "unixgram" and
- *   "unixpacket".
- *
- * Examples:
- *
- *     dial({ port: 80 })
- *     dial({ hostname: "192.0.2.1", port: 80 })
- *     dial({ hostname: "[2001:db8::1]", port: 80 });
- *     dial({ hostname: "golang.org", port: 80, transport: "tcp" })
- */
-export function dial(options: DialOptions): Promise<Conn> {
-  throw new Error("unsupported");
-}
-
-export interface DialTLSOptions {
-  port: number;
-  hostname?: string;
-  certFile?: string;
-}
-
-/**
- * dialTLS establishes a secure connection over TLS (transport layer security).
- */
-export function dialTLS(options: DialTLSOptions): Promise<Conn> {
-  throw new Error("unsupported");
-}
-
 export interface Metrics {
   opsDispatched: number;
   opsCompleted: number;
@@ -1405,7 +1231,7 @@ export function metrics(): Metrics {
 
 // @url js/resources.d.ts
 
-interface ResourceMap {
+export interface ResourceMap {
   [rid: number]: string;
 }
 
@@ -1413,12 +1239,9 @@ interface ResourceMap {
  * representation.
  */
 export function resources(): ResourceMap {
-  return Object.fromEntries([
-    ...[...files.entries()].map(e => [e[0], "file"]),
-    ...[...processes.entries()].map(e => [e[0], "process"]),
-    ...[...conns.entries()].map(e => [e[0], "conn"])
-  ]);
+  return ResourceTable.map();
 }
+
 type ProcessStdio = "inherit" | "piped" | "null";
 export interface RunOptions {
   args: string[];
@@ -1440,91 +1263,32 @@ export function kill(pid: number, signo: number): void {
   process.kill(pid, signo);
 }
 
-class DenoProcess {
+export interface DenoProcess {
   readonly rid: number;
   readonly pid: number;
   readonly stdin?: WriteCloser;
   readonly stdout?: ReadCloser;
   readonly stderr?: ReadCloser;
-  statusDeferred = deferred<ProcessStatus>();
-
-  constructor(rid: number, readonly proc: cp.ChildProcess) {
-    this.rid = rid;
-    this.pid = proc.pid;
-    if (proc.stdin) {
-      const w = streamToWriter(proc.stdin);
-      this.stdin = {
-        ...w,
-        close(): void {}
-      };
-    }
-    if (proc.stdout) {
-      const r = streamToReader(proc.stdout);
-      this.stdout = {
-        ...r,
-        close(): void {}
-      };
-    }
-    if (proc.stderr) {
-      const r = streamToReader(proc.stderr);
-      this.stderr = {
-        ...r,
-        close(): void {}
-      };
-    }
-    proc.on("exit", (code, sig) => {
-      const status: ProcessStatus = { success: false };
-      if (code === 0) {
-        status.success = true;
-      }
-      if (code != null) {
-        status.code = code;
-      }
-      if (sig != null) {
-        status.signal = Signal[sig];
-      }
-      this.statusDeferred.resolve(status);
-    });
-    proc.on("error", err => this.statusDeferred.reject(err));
-  }
-
-  status(): Promise<ProcessStatus> {
-    return this.statusDeferred;
-  }
+  status(): Promise<ProcessStatus>;
 
   /** Buffer the stdout and return it as Uint8Array after EOF.
    * You must set stdout to "piped" when creating the process.
    * This calls close() on stdout after its done.
    */
-  output(): Promise<Uint8Array> {
-    return readAll(this.stdout);
-  }
+  output(): Promise<Uint8Array>;
 
   /** Buffer the stderr and return it as Uint8Array after EOF.
    * You must set stderr to "piped" when creating the process.
    * This calls close() on stderr after its done.
    */
-  stderrOutput(): Promise<Uint8Array> {
-    return readAll(this.stderr);
-  }
+  stderrOutput(): Promise<Uint8Array>;
 
-  close(): void {
-    try {
-      const st = this.statusDeferred.status();
-      if (!st) {
-        this.kill(Signal.SIGKILL);
-      }
-    } finally {
-      processes.delete(this.rid);
-    }
-  }
+  close(): void;
 
-  kill(signo: number): void {
-    process.kill(this.pid, signo);
-  }
+  kill(signo: number): void;
 }
 
-export { DenoProcess as Process };
+export { DenoProcessImpl as Process };
 
 export interface ProcessStatus {
   success: boolean;
@@ -1550,10 +1314,7 @@ export function run(opt: RunOptions): DenoProcess {
     cwd: opt.cwd,
     env: opt.env
   });
-  const rid = resourceId++;
-  const proc = new DenoProcess(rid, p);
-  processes.set(rid, proc);
-  return proc;
+  return ResourceTable.openProcess(p);
 }
 
 enum LinuxSignal {
@@ -1688,3 +1449,4 @@ export const version: Version = {
 export const args: string[] = [...process.argv];
 
 export * from "./buffer";
+export * from "./net";

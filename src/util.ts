@@ -1,5 +1,5 @@
 import { EOF, Reader, Writer } from "./deno";
-import * as fs from "fs";
+import { TextDecoder, TextEncoder } from "./encoding";
 
 interface Deferred<T> extends Promise<T> {
   status(): "resolved" | "rejected" | undefined;
@@ -92,8 +92,11 @@ export function streamToWriter(stream: NodeJS.WritableStream): Writer {
   return { write };
 }
 
-export function pathExists(path:string): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    fs.exists(path, ok => resolve(ok));
-  })
+const encoder = new TextEncoder();
+export function encode(s: string): Uint8Array {
+  return encoder.encode(s);
+}
+const decoder = new TextDecoder();
+export function decode(p: Uint8Array): string {
+  return decoder.decode(p);
 }

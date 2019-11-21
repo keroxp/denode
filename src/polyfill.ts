@@ -1,4 +1,4 @@
-import {TextEncoder, TextDecoder} from "./encoding";
+import { TextEncoder, TextDecoder } from "./encoding";
 const _Deno = require("./deno");
 const { Base64 } = require("js-base64");
 const _fetch = require("node-fetch");

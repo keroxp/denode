@@ -5,7 +5,15 @@
 // https://github.com/golang/go/blob/master/LICENSE
 
 import { TextDecoder } from "./encoding";
-import {DenoError, EOF, ErrorKind, Reader, SyncReader, SyncWriter, Writer} from "./deno";
+import {
+  DenoError,
+  EOF,
+  ErrorKind,
+  Reader,
+  SyncReader,
+  SyncWriter,
+  Writer
+} from "./deno";
 
 // MIN_READ is the minimum ArrayBuffer size passed to a read call by
 // buffer.ReadFrom. As long as the Buffer has at least MIN_READ bytes beyond
@@ -120,7 +128,7 @@ export class Buffer implements Reader, SyncReader, Writer, SyncWriter {
   }
 
   private _reslice(len: number): void {
-    if(len > this.buf.buffer.byteLength) {
+    if (len > this.buf.buffer.byteLength) {
       throw new Error("short len");
     }
     this.buf = new Uint8Array(this.buf.buffer, 0, len);
