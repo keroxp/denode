@@ -562,6 +562,70 @@ declare namespace Deno {
    */
   export function readFile(filename: string): Promise<Uint8Array>;
 
+  /** Synchronously write string `data` to the given `path`, by default creating a new file if needed,
+   * else overwriting.
+   *
+   * ```ts
+   * await Deno.writeTextFileSync("hello1.txt", "Hello world\n");  // overwrite "hello1.txt" or create it
+   * ```
+   *
+   * Requires `allow-write` permission, and `allow-read` if `options.create` is `false`.
+   */
+
+  /** Synchronously reads and returns the entire contents of a file as utf8 encoded string
+   *  encoded string. Reading a directory returns an empty string.
+   *
+   * ```ts
+   * const data = Deno.readTextFileSync("hello.txt");
+   * console.log(data);
+   * ```
+   *
+   * Requires `allow-read` permission. */
+  export function readTextFileSync(path: string): string;
+
+  /** Asynchronously reads and returns the entire contents of a file as a utf8
+   *  encoded string. Reading a directory returns an empty data array.
+   *
+   * ```ts
+   * const data = await Deno.readTextFile("hello.txt");
+   * console.log(data);
+   * ```
+   *
+   * Requires `allow-read` permission. */
+
+  export function readTextFile(path: string): Promise<string>;
+
+  /** Asynchronously write string `data` to the given `path`, by default creating a new file if needed,
+   * else overwriting.
+   *
+   * ```ts
+   * await Deno.writeTextFile("hello1.txt", "Hello world\n");  // overwrite "hello1.txt" or create it
+   * ```
+   *
+   * Requires `allow-write` permission, and `allow-read` if `options.create` is `false`.
+   */
+
+  export function writeTextFileSync(
+    path: string | URL,
+    data: string,
+    options?: WriteFileOptions
+  ): void;
+
+  /** Asynchronously write string `data` to the given `path`, by default creating a new file if needed,
+   * else overwriting.
+   *
+   * ```ts
+   * await Deno.writeTextFile("hello1.txt", "Hello world\n");  // overwrite "hello1.txt" or create it
+   * ```
+   *
+   * Requires `allow-write` permission, and `allow-read` if `options.create` is `false`.
+   */
+  export function writeTextFile(
+    path: string | URL,
+    data: string,
+    options?: WriteFileOptions
+  ): Promise<void>;
+
   // @url js/file_info.d.ts
 
   /** A FileInfo describes a file and is returned by `stat`, `lstat`,
@@ -1297,7 +1361,6 @@ declare namespace Deno {
 
   export const args: string[];
 }
-
 // @url js/globals.ts
 
 declare interface Window {
@@ -2192,7 +2255,8 @@ declare namespace customEvent {
   // @url js/custom_event.d.ts
 
   export const customEventAttributes: WeakMap<object, any>;
-  export class CustomEventInit extends event.EventInit
+  export class CustomEventInit
+    extends event.EventInit
     implements domTypes.CustomEventInit {
     detail: any;
     constructor({
@@ -2223,7 +2287,8 @@ declare namespace eventTarget {
     constructor({ capture }?: { capture?: boolean | undefined });
     readonly capture: boolean;
   }
-  export class AddEventListenerOptions extends EventListenerOptions
+  export class AddEventListenerOptions
+    extends EventListenerOptions
     implements domTypes.AddEventListenerOptions {
     _passive: boolean;
     _once: boolean;
@@ -2259,7 +2324,7 @@ declare namespace eventTarget {
   export class EventTarget implements domTypes.EventTarget {
     [domTypes.eventTargetHost]: domTypes.EventTarget | null;
     [domTypes.eventTargetListeners]: {
-      [type in string]: domTypes.EventListener[]
+      [type in string]: domTypes.EventListener[];
     };
     [domTypes.eventTargetMode]: string;
     [domTypes.eventTargetNodeType]: domTypes.NodeType;
@@ -2850,4 +2915,3 @@ declare namespace WebAssembly {
 }
 
 /* eslint-enable @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any */
-
