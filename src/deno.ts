@@ -702,6 +702,31 @@ export async function readFile(filename: string): Promise<Uint8Array> {
   return fs.promises.readFile(filename);
 }
 
+/** Synchronously reads and returns the entire contents of a file as utf8 encoded string
+ *  encoded string. Reading a directory returns an empty string.
+ *
+ * ```ts
+ * const data = Deno.readTextFileSync("hello.txt");
+ * console.log(data);
+ * ```
+ *
+ * Requires `allow-read` permission. */
+export function readTextFileSync(path: string): string {
+  return fs.readFileSync(path, "utf8");
+}
+
+/** Asynchronously reads and returns the entire contents of a file as a utf8
+ *  encoded string. Reading a directory returns an empty data array.
+ *
+ * ```ts
+ * const data = await Deno.readTextFile("hello.txt");
+ * console.log(data);
+ * ```
+ *
+ * Requires `allow-read` permission. */
+export function readTextFile(path: string): Promise<string> {
+  return fs.promises.readFile(path, "utf8");
+}
 export interface FileInfo {
   /** The size of the file, in bytes. */
   len: number;
@@ -985,6 +1010,45 @@ export function writeFile(
     flag,
     mode: options.perm
   });
+}
+
+/** Asynchronously write string `data` to the given `path`, by default creating a new file if needed,
+ * else overwriting.
+ *
+ * ```ts
+ * await Deno.writeTextFile("hello1.txt", "Hello world\n");  // overwrite "hello1.txt" or create it
+ * ```
+ *
+ * Requires `allow-write` permission, and `allow-read` if `options.create` is `false`.
+ */
+
+export function writeTextFile(
+  filename: string,
+  data: string,
+  options?: WriteFileOptions
+): Promise<void> {
+  const encoder = new TextEncoder();
+  const UTF8Data = encoder.encode(data);
+  return writeFile(filename, UTF8Data, options);
+}
+
+/** Synchronously write string `data` to the given `path`, by default creating a new file if needed,
+ * else overwriting.
+ *
+ * ```ts
+ * await Deno.writeTextFileSync("hello1.txt", "Hello world\n");  // overwrite "hello1.txt" or create it
+ * ```
+ *
+ * Requires `allow-write` permission, and `allow-read` if `options.create` is `false`.
+ */
+export function writeTextFileSync(
+  filename: string,
+  data: string,
+  options?: WriteFileOptions
+): void {
+  const encoder = new TextEncoder();
+  const UTF8Data = encoder.encode(data);
+  return writeFileSync(filename, UTF8Data);
 }
 
 // @url js/error_stack.d.ts
